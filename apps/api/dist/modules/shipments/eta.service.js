@@ -4,56 +4,43 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 };
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.etaService = void 0;
+exports.isHoliday = isHoliday;
+exports.nextWeekday = nextWeekday;
 const prisma_1 = __importDefault(require("../../utils/prisma"));
 const luxon_1 = require("luxon");
-// All data reads are from DB only (no hardcoded fallbacks)
+// All data reads are from DB only (no hardcoded fallbacks).
+// Fail-loud contract: configuration lookups propagate infrastructure failures
+// (database outage/query error) as typed errors to the caller so they can NEVER
+// be mistaken for an ordinary "route unavailable" empty ETA result. Ordinary
+// route unavailability is represented by the documented EMPTY payload, not by
+// swallowed exceptions.
 async function getAirports() {
-    try {
-        const rows = await prisma_1.default.airport.findMany();
-        if (rows && rows.length)
-            return rows.map(r => ({ code: r.code, city: r.city, name: r.name, type: r.type, processingHours: r.processingHours, businessStart: r.businessStart, businessEnd: r.businessEnd, tzOffset: r.tzOffset, countryCode: r.countryCode || r.country, country: r.country, timezone: r.timezone, operationalBufferHours: r.operationalBufferHours || 0, loadFactor: r.loadFactor || 0, capacityStatus: r.capacityStatus || 'NORMAL' }));
-    }
-    catch { }
-    return [];
+    const rows = await prisma_1.default.airport.findMany();
+    return rows.map(r => ({ code: r.code, city: r.city, name: r.name, type: r.type, processingHours: r.processingHours, businessStart: r.businessStart, businessEnd: r.businessEnd, tzOffset: r.tzOffset, countryCode: r.countryCode, country: r.country, timezone: r.timezone, operationalBufferHours: r.operationalBufferHours ?? 0, loadFactor: r.loadFactor ?? 0, capacityStatus: r.capacityStatus ?? 'NORMAL' }));
 }
 async function getSchedules() {
-    try {
-        const rows = await prisma_1.default.flightSchedule.findMany();
-        if (rows && rows.length)
-            return rows.map(r => ({ originCode: r.originCode || '', destinationCode: r.destinationCode || '', originCity: r.originCity, destinationCity: r.destinationCity, daysOfWeek: r.daysOfWeek, dailyFrequency: r.dailyFrequency, lastDepartureLocal: r.lastDepartureLocal, flightMinutes: r.flightMinutes }));
-    }
-    catch { }
-    return [];
+    const rows = await prisma_1.default.flightSchedule.findMany();
+    return rows.map(r => ({ originCode: r.originCode || '', destinationCode: r.destinationCode || '', originCity: r.originCity, destinationCity: r.destinationCity, daysOfWeek: r.daysOfWeek, dailyFrequency: r.dailyFrequency, lastDepartureLocal: r.lastDepartureLocal, flightMinutes: r.flightMinutes }));
 }
 async function getServiceLevelSettings() {
-    try {
-        const rows = await prisma_1.default.serviceLevelSettings.findMany();
-        const map = {};
-        for (const r of rows) {
-            const t = String(r.airportType || '').toLowerCase();
-            map[t] = map[t] || {};
-            map[t][String(r.serviceLevel).toLowerCase()] = { cutoffHour: r.cutoffHour, adjustment: r.processingAdjustmentHours };
-        }
-        return map;
+    const rows = await prisma_1.default.serviceLevelSettings.findMany();
+    const map = {};
+    for (const r of rows) {
+        const t = String(r.airportType || '').toLowerCase();
+        map[t] = map[t] || {};
+        map[t][String(r.serviceLevel).toLowerCase()] = { cutoffHour: r.cutoffHour, adjustment: r.processingAdjustmentHours };
     }
-    catch {
-        return {};
-    }
+    return map;
 }
 async function isHoliday(date, city, airportCode, countryCode) {
-    try {
-        const start = new Date(date);
-        start.setHours(0, 0, 0, 0);
-        const end = new Date(date);
-        end.setHours(23, 59, 59, 999);
-        const rows = await prisma_1.default.operatingCalendar.findMany({ where: { country: countryCode || 'ET', date: { gte: start, lte: end } } });
-        if (!rows || !rows.length)
-            return false;
-        return rows.some((r) => r.closedAllDay && ((airportCode && r.airportCode && r.airportCode.toLowerCase() === airportCode.toLowerCase()) || (!airportCode && (!city || !r.city || r.city.toLowerCase() === String(city).toLowerCase()))));
-    }
-    catch {
+    const start = new Date(date);
+    start.setHours(0, 0, 0, 0);
+    const end = new Date(date);
+    end.setHours(23, 59, 59, 999);
+    const rows = await prisma_1.default.operatingCalendar.findMany({ where: { country: countryCode || 'ET', date: { gte: start, lte: end } } });
+    if (!rows || !rows.length)
         return false;
-    }
+    return rows.some(r => r.closedAllDay && ((airportCode && r.airportCode && r.airportCode.toLowerCase() === airportCode.toLowerCase()) || (!airportCode && (!city || !r.city || r.city.toLowerCase() === String(city).toLowerCase()))));
 }
 function findAirportByCode(list, code) {
     return list.find(a => a.code?.toLowerCase() === code.toLowerCase());
@@ -118,6 +105,9 @@ function cutoffHour(sl, airportType) {
         return t === 'hub' ? 14 : t === 'regional' ? 13 : 12;
     return t === 'hub' ? 13 : t === 'regional' ? 12 : 11;
 }
+// NOTE (characterization): nextWeekday only skips Sat/Sun; it does NOT consult
+// OperatingCalendar. Holiday handling is a separate, single-shot shift applied
+// only to the final delivery timestamp (see calculateETA). Exported for tests.
 function nextWeekday(dt, businessStart) {
     const d = new Date(dt);
     const day = d.getDay();
@@ -150,6 +140,9 @@ exports.etaService = {
             return { estimatedDelivery: '', steps: [], totalHours: 0, totalDays: 0, flights: [] };
         }
         const t0 = new Date(dropoffTime);
+        if (Number.isNaN(t0.getTime())) {
+            throw new RangeError('dropoffTime is not a valid date');
+        }
         const startBase = withinBusiness(t0, origin.businessStart, origin.businessEnd) ? t0 : nextBusinessStart(t0, origin.businessStart);
         const start = nextWeekday(startBase, origin.businessStart);
         const typeKey = String(origin.type || '').toLowerCase();
@@ -192,7 +185,19 @@ exports.etaService = {
         }
         const originHub = (await pickHubFor(origin.countryCode)) || 'ADD';
         const destHub = (await pickHubFor(dest.countryCode)) || 'ADD';
-        const viaHub = origin.code.toLowerCase() !== dest.code.toLowerCase() && (origin.code.toLowerCase() !== destHub.toLowerCase() || dest.code.toLowerCase() !== originHub.toLowerCase());
+        // Hub-relay is used only when NO direct schedule exists for the requested
+        // city pair (by code or by city). When both endpoints belong to the same
+        // hub country (originHub === destHub) and neither endpoint IS that hub,
+        // the relay is origin -> hub -> destination (two legs), not the three-leg
+        // international pattern. Previously this condition used `||`, which routed
+        // every non-(origin==destHub && dest==originHub) pair — including direct
+        // domestic flights INTO the hub (e.g. BJR->ADD) — through the hub branch,
+        // where they searched for a nonexistent ADD->ADD second leg and returned
+        // the EMPTY payload. This is the documented routing-defect fix.
+        const hasDirect = !!(findScheduleByCodes(schedulesData, origin.code, dest.code) ||
+            findScheduleByCities(schedulesData, origin.city, dest.city));
+        const viaHub = !hasDirect && origin.code.toLowerCase() !== dest.code.toLowerCase();
+        const sameCountryRelay = !!originHub && !!destHub && originHub.toLowerCase() === destHub.toLowerCase();
         const flights = [];
         let arrival = null;
         if (viaHub) {
@@ -206,22 +211,31 @@ exports.etaService = {
             const international = String(origin.countryCode || '').toUpperCase() !== String(dest.countryCode || '').toUpperCase();
             const hubLayover = international ? 3 : 1;
             const leg2Ready = addHours(leg1Arr, hubLayover);
-            let leg2Dep = nextFlightTimeByCodes(schedulesData, originHub, destHub, leg2Ready) || nextFlightTimeByCities(schedulesData, originHubCity, destHubCity, leg2Ready);
+            // When both endpoints share the same regional hub, the second relay leg
+            // goes hub -> destination directly; searching for a hub -> hub flight
+            // would fabricate an ADD->ADD "flight".
+            const leg2ToCode = sameCountryRelay ? dest.code : destHub;
+            const leg2ToCity = sameCountryRelay ? dest.city : destHubCity;
+            let leg2Dep = nextFlightTimeByCodes(schedulesData, originHub, leg2ToCode, leg2Ready) || nextFlightTimeByCities(schedulesData, originHubCity, leg2ToCity, leg2Ready);
             if (!leg2Dep)
                 return { estimatedDelivery: '', steps: [], totalHours: 0, totalDays: 0, flights: [] };
-            const leg2Mins = (findScheduleByCodes(schedulesData, originHub, destHub)?.flightMinutes || 180);
-            const leg2Arr = addFlightMinutesWithTimezone(leg2Dep, leg2Mins, airportsData.find(a => a.code === originHub)?.timezone || 'UTC', airportsData.find(a => a.code === destHub)?.timezone || 'UTC');
+            const leg2Mins = (findScheduleByCodes(schedulesData, originHub, leg2ToCode)?.flightMinutes || findScheduleByCities(schedulesData, originHubCity, leg2ToCity)?.flightMinutes || 180);
+            const leg2Arr = addFlightMinutesWithTimezone(leg2Dep, leg2Mins, airportsData.find(a => a.code === originHub)?.timezone || 'UTC', airportsData.find(a => a.code === leg2ToCode)?.timezone || dest.timezone || 'UTC');
             arrival = leg2Arr;
             flights.push({ origin: origin.code, destination: originHub, departure: leg1Dep, arrival: leg1Arr });
-            flights.push({ origin: originHub, destination: destHub, departure: leg2Dep, arrival: leg2Arr });
-            const finalLayover = international ? 2 : 1;
-            const finalReady = addHours(arrival, finalLayover);
-            const finalDep = nextFlightTimeByCodes(schedulesData, destHub, dest.code, finalReady) || nextFlightTimeByCities(schedulesData, destHubCity, dest.city, finalReady);
-            if (finalDep) {
-                const finalMins = (findScheduleByCodes(schedulesData, destHub, dest.code)?.flightMinutes || findScheduleByCities(schedulesData, destHubCity, dest.city)?.flightMinutes || 90);
-                const finalArr = addFlightMinutesWithTimezone(finalDep, finalMins, airportsData.find(a => a.code === destHub)?.timezone || 'UTC', dest.timezone);
-                flights.push({ origin: destHub, destination: dest.code, departure: finalDep, arrival: finalArr });
-                arrival = finalArr;
+            flights.push({ origin: originHub, destination: leg2ToCode, departure: leg2Dep, arrival: leg2Arr });
+            // The third (hub -> destination feeder) leg only applies when the relay
+            // actually terminated at a foreign hub different from the destination.
+            if (!sameCountryRelay && destHub.toLowerCase() !== dest.code.toLowerCase()) {
+                const finalLayover = international ? 2 : 1;
+                const finalReady = addHours(arrival, finalLayover);
+                const finalDep = nextFlightTimeByCodes(schedulesData, destHub, dest.code, finalReady) || nextFlightTimeByCities(schedulesData, destHubCity, dest.city, finalReady);
+                if (finalDep) {
+                    const finalMins = (findScheduleByCodes(schedulesData, destHub, dest.code)?.flightMinutes || findScheduleByCities(schedulesData, destHubCity, dest.city)?.flightMinutes || 90);
+                    const finalArr = addFlightMinutesWithTimezone(finalDep, finalMins, airportsData.find(a => a.code === destHub)?.timezone || 'UTC', dest.timezone);
+                    flights.push({ origin: destHub, destination: dest.code, departure: finalDep, arrival: finalArr });
+                    arrival = finalArr;
+                }
             }
         }
         else {

@@ -233,7 +233,13 @@ shipmentsRouter.post('/eta/calculate', async (req: any, res) => {
     });
     res.json({ success: true, data: result });
   } catch (error) {
-    res.status(500).json({ success: false, error: 'Failed to calculate ETA' });
+    // Invalid input (e.g. unparsable dropoffTime) is a 400; anything else
+    // (including propagated database failures) maps through sendError so a
+    // DB outage can never masquerade as a successful empty ETA.
+    if (error instanceof RangeError) {
+      return res.status(400).json({ success: false, error: 'dropoffTime is not a valid date' });
+    }
+    sendError(res, error, 'Failed to calculate ETA');
   }
 });
 
@@ -249,7 +255,7 @@ shipmentsRouter.get('/eta/availability', async (req: any, res) => {
     });
     res.json({ success: true, data: result });
   } catch (error) {
-    res.status(500).json({ success: false, error: 'Failed to get availability' });
+    sendError(res, error, 'Failed to get availability');
   }
 });
 
@@ -522,7 +528,10 @@ shipmentsRouter.get('/:id/eta', requireAuth, async (req: any, res) => {
     });
     res.json({ success: true, data: result });
   } catch (error) {
-    res.status(500).json({ success: false, error: 'Failed to calculate ETA' });
+    if (error instanceof RangeError) {
+      return res.status(400).json({ success: false, error: 'dropoffTime is not a valid date' });
+    }
+    sendError(res, error, 'Failed to calculate ETA');
   }
 });
 

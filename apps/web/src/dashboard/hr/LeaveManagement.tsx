@@ -20,6 +20,10 @@ import { apiService } from '@/lib/api/client';
 import { API_ENDPOINTS } from '@/lib/api/endpoints';
 import { toast } from 'sonner';
 import { LeaveApprovalModal } from '@/dashboard/hr/LeaveApprovalModal';
+import type {
+  LeaveRequest as ModalLeaveRequest,
+  ApprovalStatus,
+} from '@/types/leave';
 
 export interface LeaveRequest {
   id: string;
@@ -40,6 +44,43 @@ export interface LeaveRequest {
   managerId?: string;
   manager?: { id?: string; userId?: string; user?: { id?: string; name?: string } | null };
   backupEmployee?: { id?: string; firstName?: string; lastName?: string } | null;
+}
+
+// Narrowing guard: only the three documented approval states are valid in the
+// modal's canonical type. Anything unexpected falls back to 'PENDING' so the
+// modal's stage logic stays conservative (an unknown stage is treated as not
+// yet actioned rather than silently APPROVED/REJECTED).
+function asApprovalStatus(value: string | undefined): ApprovalStatus {
+  return value === 'APPROVED' || value === 'REJECTED' ? value : 'PENDING';
+}
+
+// Typed adapter from the dashboard's raw API representation to the modal's
+// canonical LeaveRequest (@/types/leave). Preserves every field the modal
+// renders or uses for approval decisions: id, dates, totals, reason,
+// emergency contact, backup employee display name, and the three approval
+// statuses. No data needed for approvals or display is discarded.
+export function toModalLeave(leave: LeaveRequest): ModalLeaveRequest {
+  const backup = leave.backupEmployee;
+  const backupName = backup
+    ? [backup.firstName, backup.lastName].filter(Boolean).join(' ').trim()
+    : '';
+  return {
+    id: leave.id,
+    employee: {
+      name: leave.employee?.user?.name || 'Unknown Employee',
+      email: leave.employee?.user?.email || '',
+    },
+    leaveType: { name: leave.leaveType },
+    totalDays: leave.totalDays,
+    startDate: leave.startDate,
+    endDate: leave.endDate,
+    reason: leave.reason ?? null,
+    emergencyContact: leave.emergencyContact ?? null,
+    backupEmployee: backup ? { id: backup.id, name: backupName } : null,
+    managerApproval: asApprovalStatus(leave.managerApproval),
+    hrApproval: asApprovalStatus(leave.hrApproval),
+    status: asApprovalStatus(leave.status),
+  };
 }
 
 // The API returns { status: 'success', leaves: [...], pagination } — NOT `.data`.
@@ -65,6 +106,7 @@ const LeaveManagement = () => {
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState('all');
+  const [decisionInProgress, setDecisionInProgress] = useState(false);
 
   const leaveStats = useMemo(() => {
     const pending = leaveRequests.filter(l => l.status === 'PENDING').length;
@@ -178,8 +220,14 @@ const LeaveManagement = () => {
     setShowApprovalModal(true);
   };
 
-  const handleDecision = async (status: 'APPROVED' | 'REJECTED', comments: string) => {
-    if (!selectedLeave) return;
+  const handleDecision = async (leaveId: string, status: 'APPROVED' | 'REJECTED', comments: string) => {
+    // The modal supplies the ID of the leave it is displaying. Verify it
+    // matches the selected record before submitting — never act on a stale or
+    // mismatched ID.
+    if (!selectedLeave || leaveId !== selectedLeave.id) return;
+    // Prevent duplicate submissions while an approval/rejection is in flight.
+    if (decisionInProgress) return;
+    setDecisionInProgress(true);
     try {
       const url = approvalRole === 'hr'
         ? API_ENDPOINTS.hr.leaveRequests.approve.hr(selectedLeave.id)
@@ -201,7 +249,11 @@ const LeaveManagement = () => {
       setSelectedLeave(null);
       await loadLeaveData();
     } catch (err) {
+      // Surface the failure WITHOUT closing the modal — the operation did not
+      // succeed and the reviewer may retry or cancel explicitly.
       toast.error(err instanceof Error ? err.message : 'Failed to update leave request');
+    } finally {
+      setDecisionInProgress(false);
     }
   };
 
@@ -342,9 +394,9 @@ const LeaveManagement = () => {
           setShowApprovalModal(false);
           setSelectedLeave(null);
         }}
-        onApprove={(_id, comments) => handleDecision('APPROVED', comments)}
-        onReject={(_id, comments) => handleDecision('REJECTED', comments)}
-        isLoading={false}
+        onApprove={(id, comments) => handleDecision(id, 'APPROVED', comments)}
+        onReject={(id, comments) => handleDecision(id, 'REJECTED', comments)}
+        isLoading={decisionInProgress}
         userRole={approvalRole}
       />
     </div>
