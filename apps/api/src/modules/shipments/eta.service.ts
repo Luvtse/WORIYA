@@ -285,11 +285,11 @@ function nextFlightTimeByCities(schedList: ScheduleInfo[], originCity: string, d
  * local fields equal the destination-local arrival time).
  */
 function addFlightMinutesWithTimezone(departure: Date, minutes: number, originTz?: string, destTz?: string): Date {
-  const originZone = Info.normalizeZone(originTz || 'UTC');
-  const destZone = Info.normalizeZone(destTz || originTz || 'UTC');
-  const zone = originZone.type === 'invalid' ? 'UTC' : (originTz || 'UTC');
+  const isValidZone = (z: string) => DateTime.now().setZone(z).isValid;
+  const zone = isValidZone(originTz || 'UTC') ? (originTz || 'UTC') : 'UTC';
+  const destZone = isValidZone(destTz || zone) ? (destTz || zone) : zone;
   const depDT = DateTime.fromJSDate(departure, { zone });
-  const arrDT = depDT.plus({ minutes }).setZone(destZone.type === 'invalid' ? zone : (destTz || zone));
+  const arrDT = depDT.plus({ minutes }).setZone(destZone);
   // Re-anchor the resulting destination-local wall clock so downstream
   // setHours/getHours arithmetic operates in destination-local terms.
   return new Date(arrDT.year, arrDT.month - 1, arrDT.day, arrDT.hour, arrDT.minute, arrDT.second, arrDT.millisecond);

@@ -1,0 +1,1 @@
+const n=async e=>(console.warn("[generateInvoicePDF] Client-side PDF generation is not available. Use the server /reports endpoint."),new Blob(["PDF generation not available in this environment."],{type:"application/pdf"}));export{n as generateInvoicePDF};
