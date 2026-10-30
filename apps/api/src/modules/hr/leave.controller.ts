@@ -376,6 +376,10 @@ export class LeaveController {
       });
 
       if (!leave) return res.status(404).json({ error: 'Leave request not found' });
+      // A manager must never approve their own leave request.
+      if (leave.employeeId === manager.id) {
+        return res.status(403).json({ error: 'Managers cannot approve their own leave requests' });
+      }
       if (leave.managerId !== manager.id) {
         return res.status(403).json({ error: 'Not authorized to approve this request' });
       }
